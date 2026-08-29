@@ -7,9 +7,11 @@
 <meta name="theme-color" content="#EEF3F9" />
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Poppins:wght@600;700&display=swap" rel="stylesheet" />
 <script src="https://cdn.tailwindcss.com"></script>
 <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
 <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <style>
   html, body, #root { height: 100%; }
   body { margin: 0; background: #EEF3F9; -webkit-font-smoothing: antialiased; }
@@ -19,50 +21,115 @@
   select { -webkit-appearance: none; appearance: none;
     background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='8'><path d='M1 1l5 5 5-5' fill='none' stroke='%239AA8BC' stroke-width='2' stroke-linecap='round'/></svg>");
     background-repeat: no-repeat; background-position: right 14px center; padding-right: 34px; }
+  #bq-save { position: fixed; left: 50%; transform: translateX(-50%);
+    bottom: calc(80px + env(safe-area-inset-bottom)); z-index: 60;
+    padding: 7px 16px; border-radius: 999px; font: 500 12px/1 Inter, system-ui, sans-serif;
+    background: #101B2B; color: #fff; box-shadow: 0 8px 24px rgba(15,27,45,0.22);
+    opacity: 0; pointer-events: none; transition: opacity .2s ease; }
+  #bq-save.on { opacity: 1; }
+  #bq-save.err { background: #D0491F; }
 </style>
 </head>
 <body>
 <div id="root"></div>
+<div id="bq-save"></div>
 
 <script>
-/* Speicher-Adapter: nutzt window.storage, falls vorhanden, sonst localStorage.
-   Die API (get/set mit {value}) bleibt identisch, die App-Logik bleibt unangetastet. */
+/* ================================================================== */
+/*  SUPABASE-KONFIGURATION                                            */
+/* ================================================================== */
+
+const SUPABASE_URL      = "https://pizihlihfonvaszculha.supabase.co";
+const SUPABASE_ANON_KEY = "sb_publishable_leAZF9M99USZ8zj_XviFww_OE4JMvo6";
+
+/* ================================================================== */
+
+window.SB = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+  auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true }
+});
+
+/* Einladungs- bzw. Reset-Link erkennen, bevor supabase-js den Hash aufräumt */
+window.BQ_INVITE = /type=(invite|recovery|signup)/.test(window.location.hash || "")
+                || /type=(invite|recovery|signup)/.test(window.location.search || "");
+
+/* ------------------------------------------------------------------ */
+/* Speicher: alle Schlüssel liegen in einer Zeile der Tabelle          */
+/* attendance. Gelesen wird aus dem Cache, geschrieben entprellt.      */
+/* ------------------------------------------------------------------ */
 (function () {
-  if (window.storage && typeof window.storage.get === "function") return;
-  var PREFIX = "bq:";
+  var cache = {};
+  var userId = null;
+  var timer = null;
+  var el = null;
+  var hideTimer = null;
+
+  function badge(text, isError) {
+    if (!el) el = document.getElementById("bq-save");
+    if (!el) return;
+    clearTimeout(hideTimer);
+    if (!text) { el.className = ""; return; }
+    el.textContent = text;
+    el.className = isError ? "on err" : "on";
+    if (!isError) hideTimer = setTimeout(function () { el.className = ""; }, 1800);
+  }
+
+  function flush() {
+    if (!userId) return;
+    window.SB.from("attendance")
+      .upsert({ user_id: userId, data: cache, updated_at: new Date().toISOString() }, { onConflict: "user_id" })
+      .then(function (res) {
+        if (res.error) {
+          badge("Nicht gespeichert", true);
+          console.error("Speichern fehlgeschlagen:", res.error);
+        } else {
+          var d = new Date();
+          badge("Gespeichert " + String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0"));
+        }
+      });
+  }
+
+  window.BQStore = {
+    pending: false,
+    /* Einmal nach der Anmeldung: Zeile laden und in den Cache legen. */
+    init: function (id) {
+      userId = id;
+      return window.SB.from("attendance").select("data").eq("user_id", id).maybeSingle()
+        .then(function (res) {
+          if (res.error) throw res.error;
+          cache = (res.data && res.data.data) || {};
+          return true;
+        });
+    },
+    reset: function () { cache = {}; userId = null; clearTimeout(timer); }
+  };
+
   window.storage = {
     get: function (key) {
       return new Promise(function (resolve, reject) {
-        var v = null;
-        try { v = window.localStorage.getItem(PREFIX + key); } catch (e) { return reject(e); }
-        if (v === null) return reject(new Error("not found"));
-        resolve({ key: key, value: v, shared: false });
+        if (!(key in cache)) return reject(new Error("not found"));
+        resolve({ key: key, value: JSON.stringify(cache[key]), shared: false });
       });
     },
     set: function (key, value) {
-      return new Promise(function (resolve, reject) {
-        try { window.localStorage.setItem(PREFIX + key, value); } catch (e) { return reject(e); }
+      return new Promise(function (resolve) {
+        try { cache[key] = JSON.parse(value); } catch (e) { cache[key] = value; }
+        badge("Speichert \u2026");
+        clearTimeout(timer);
+        timer = setTimeout(flush, 700);
         resolve({ key: key, value: value, shared: false });
       });
     },
     delete: function (key) {
       return new Promise(function (resolve) {
-        try { window.localStorage.removeItem(PREFIX + key); } catch (e) {}
+        delete cache[key];
+        clearTimeout(timer);
+        timer = setTimeout(flush, 700);
         resolve({ key: key, deleted: true, shared: false });
       });
     },
     list: function (prefix) {
       return new Promise(function (resolve) {
-        var keys = [];
-        try {
-          for (var i = 0; i < window.localStorage.length; i++) {
-            var k = window.localStorage.key(i);
-            if (k && k.indexOf(PREFIX) === 0) {
-              var bare = k.slice(PREFIX.length);
-              if (!prefix || bare.indexOf(prefix) === 0) keys.push(bare);
-            }
-          }
-        } catch (e) {}
+        var keys = Object.keys(cache).filter(function (k) { return !prefix || k.indexOf(prefix) === 0; });
         resolve({ keys: keys, prefix: prefix, shared: false });
       });
     }
@@ -276,6 +343,228 @@
     const base = a + b;
     return { a, b, base, quote: base ? a / base * 100 : null };
   }
+
+  /* ---------------------------------------------------------------- */
+  /* Anmeldung                                                        */
+  /* ---------------------------------------------------------------- */
+
+  const inputBox = {
+    background: T.tile,
+    borderRadius: 12,
+    borderStyle: "solid",
+    borderWidth: 1,
+    borderColor: T.line,
+    color: T.ink
+  };
+  const primaryBtn = {
+    background: T.accent,
+    color: "#FFFFFF",
+    borderRadius: 999,
+    fontWeight: 600,
+    boxShadow: "0 8px 24px rgba(47,128,237,0.28)"
+  };
+  const ghostBtnBase = {
+    borderRadius: 999,
+    borderStyle: "solid",
+    borderWidth: 1,
+    borderColor: T.line,
+    color: T.ink,
+    background: T.surface,
+    fontWeight: 500
+  };
+
+  function AuthField({ label, ...rest }) {
+    return /* @__PURE__ */ React.createElement("label", { className: "block" },
+      /* @__PURE__ */ React.createElement("span", { style: sectionLabel }, label),
+      /* @__PURE__ */ React.createElement("input", {
+        ...rest,
+        className: "mt-2 h-12 w-full px-3 text-sm",
+        style: inputBox
+      })
+    );
+  }
+
+  function Msg({ tone, children }) {
+    const styles = {
+      error: { background: "#FDECEA", color: T.alert },
+      ok: { background: "#E6F6EF", color: "#12654A" }
+    };
+    return /* @__PURE__ */ React.createElement("div", {
+      className: "px-4 py-3 text-sm",
+      style: { ...styles[tone], borderRadius: T.radiusTile, lineHeight: 1.5 }
+    }, children);
+  }
+
+  function Shell({ title, subtitle, children }) {
+    usePoppins();
+    return /* @__PURE__ */ React.createElement("div", {
+      className: "min-h-screen",
+      style: { background: T.bg, color: T.ink, fontFamily: FONT_STACK }
+    }, /* @__PURE__ */ React.createElement("div", { className: "mx-auto max-w-sm px-4 pt-20" },
+      /* @__PURE__ */ React.createElement("div", { className: "mb-6 text-center" },
+        /* @__PURE__ */ React.createElement("div", {
+          style: { fontFamily: HEAD_STACK, fontWeight: 700, fontSize: 28, letterSpacing: "-0.03em" }
+        }, title),
+        subtitle && /* @__PURE__ */ React.createElement("p", { className: "mt-1 text-sm", style: { color: T.inkMuted } }, subtitle)
+      ),
+      /* @__PURE__ */ React.createElement("div", { className: "space-y-3 p-5", style: card }, children)
+    ));
+  }
+
+  function AuthScreen() {
+    const [mode, setMode] = useState("login");
+    const [email, setEmail] = useState("");
+    const [pw, setPw] = useState("");
+    const [busy, setBusy] = useState(false);
+    const [msg, setMsg] = useState(null);
+
+    const login = async () => {
+      setBusy(true); setMsg(null);
+      const { error } = await window.SB.auth.signInWithPassword({ email: email.trim(), password: pw });
+      setBusy(false);
+      if (error) setMsg({ tone: "error", text: "Anmeldung fehlgeschlagen. Pr\u00FCfe E-Mail und Passwort." });
+    };
+
+    const reset = async () => {
+      setBusy(true); setMsg(null);
+      const { error } = await window.SB.auth.resetPasswordForEmail(email.trim(), {
+        redirectTo: window.location.origin + window.location.pathname
+      });
+      setBusy(false);
+      setMsg(error
+        ? { tone: "error", text: "Die E-Mail konnte nicht versendet werden." }
+        : { tone: "ok", text: "E-Mail ist unterwegs. Sieh auch im Spam-Ordner nach." });
+    };
+
+    return /* @__PURE__ */ React.createElement(Shell, { title: "B\u00FCroquote", subtitle: "Melde dich an, um deine Tage zu sehen." },
+      /* @__PURE__ */ React.createElement(AuthField, {
+        label: "E-Mail", type: "email", autoComplete: "username",
+        value: email, onChange: (e) => setEmail(e.target.value)
+      }),
+      mode === "login" && /* @__PURE__ */ React.createElement(AuthField, {
+        label: "Passwort", type: "password", autoComplete: "current-password",
+        value: pw, onChange: (e) => setPw(e.target.value),
+        onKeyDown: (e) => { if (e.key === "Enter" && email && pw) login(); }
+      }),
+      msg && /* @__PURE__ */ React.createElement(Msg, { tone: msg.tone }, msg.text),
+      mode === "login"
+        ? [
+            /* @__PURE__ */ React.createElement("button", {
+              key: "go", type: "button", onClick: login, disabled: busy || !email || !pw,
+              className: "min-h-12 w-full text-sm",
+              style: { ...primaryBtn, opacity: busy || !email || !pw ? 0.5 : 1 }
+            }, busy ? "Anmelden \u2026" : "Anmelden"),
+            /* @__PURE__ */ React.createElement("button", {
+              key: "fg", type: "button", onClick: () => { setMode("reset"); setMsg(null); },
+              className: "w-full text-center text-xs font-semibold",
+              style: { color: T.accent, background: "transparent" }
+            }, "Passwort vergessen")
+          ]
+        : [
+            /* @__PURE__ */ React.createElement("button", {
+              key: "send", type: "button", onClick: reset, disabled: busy || !email,
+              className: "min-h-12 w-full text-sm",
+              style: { ...primaryBtn, opacity: busy || !email ? 0.5 : 1 }
+            }, busy ? "Senden \u2026" : "Link zum Zur\u00FCcksetzen senden"),
+            /* @__PURE__ */ React.createElement("button", {
+              key: "back", type: "button", onClick: () => { setMode("login"); setMsg(null); },
+              className: "w-full text-center text-xs font-medium",
+              style: { color: T.inkMuted, background: "transparent" }
+            }, "Zur\u00FCck zur Anmeldung")
+          ]
+    );
+  }
+
+  function SetPasswordScreen({ onDone }) {
+    const [pw, setPw] = useState("");
+    const [pw2, setPw2] = useState("");
+    const [busy, setBusy] = useState(false);
+    const [msg, setMsg] = useState(null);
+    const short = pw.length > 0 && pw.length < 8;
+    const mismatch = pw2.length > 0 && pw !== pw2;
+
+    const save = async () => {
+      setBusy(true); setMsg(null);
+      const { error } = await window.SB.auth.updateUser({ password: pw });
+      setBusy(false);
+      if (error) setMsg({ tone: "error", text: "Das Passwort wurde nicht gesetzt: " + error.message });
+      else onDone();
+    };
+
+    return /* @__PURE__ */ React.createElement(Shell, { title: "Passwort festlegen", subtitle: "Danach meldest du dich damit immer an." },
+      /* @__PURE__ */ React.createElement(AuthField, {
+        label: "Neues Passwort", type: "password", autoComplete: "new-password",
+        value: pw, onChange: (e) => setPw(e.target.value)
+      }),
+      /* @__PURE__ */ React.createElement(AuthField, {
+        label: "Wiederholen", type: "password", autoComplete: "new-password",
+        value: pw2, onChange: (e) => setPw2(e.target.value)
+      }),
+      short && /* @__PURE__ */ React.createElement(Msg, { tone: "error" }, "Mindestens 8 Zeichen."),
+      mismatch && /* @__PURE__ */ React.createElement(Msg, { tone: "error" }, "Die beiden Eingaben stimmen nicht \u00FCberein."),
+      msg && /* @__PURE__ */ React.createElement(Msg, { tone: msg.tone }, msg.text),
+      /* @__PURE__ */ React.createElement("button", {
+        type: "button", onClick: save, disabled: busy || pw.length < 8 || pw !== pw2,
+        className: "min-h-12 w-full text-sm",
+        style: { ...primaryBtn, opacity: busy || pw.length < 8 || pw !== pw2 ? 0.5 : 1 }
+      }, busy ? "Speichern \u2026" : "Passwort speichern")
+    );
+  }
+
+  /* Konto-Block im Reiter Einstellungen */
+  function KontoBlock({ email }) {
+    const [open, setOpen] = useState(false);
+    const [pw, setPw] = useState("");
+    const [busy, setBusy] = useState(false);
+    const [msg, setMsg] = useState(null);
+
+    const change = async () => {
+      setBusy(true); setMsg(null);
+      const { error } = await window.SB.auth.updateUser({ password: pw });
+      setBusy(false);
+      if (error) setMsg({ tone: "error", text: error.message });
+      else { setMsg({ tone: "ok", text: "Passwort ge\u00E4ndert." }); setPw(""); }
+    };
+
+    const signOut = async () => {
+      window.BQStore.reset();
+      await window.SB.auth.signOut();
+    };
+
+    return /* @__PURE__ */ React.createElement("div", { style: { borderTop: `1px solid ${T.line}`, paddingTop: 20 } },
+      /* @__PURE__ */ React.createElement("div", { style: sectionLabel }, "Konto"),
+      /* @__PURE__ */ React.createElement("p", { className: "mb-3 mt-1 text-xs", style: { color: T.inkMuted } },
+        "Angemeldet als ", email),
+      open
+        ? /* @__PURE__ */ React.createElement("div", { className: "mb-2 space-y-2 p-4", style: tile },
+            /* @__PURE__ */ React.createElement(AuthField, {
+              label: "Neues Passwort", type: "password", autoComplete: "new-password",
+              value: pw, onChange: (e) => setPw(e.target.value)
+            }),
+            msg && /* @__PURE__ */ React.createElement(Msg, { tone: msg.tone }, msg.text),
+            /* @__PURE__ */ React.createElement("button", {
+              type: "button", onClick: change, disabled: busy || pw.length < 8,
+              className: "min-h-11 w-full text-sm",
+              style: { ...primaryBtn, opacity: busy || pw.length < 8 ? 0.5 : 1 }
+            }, busy ? "Speichern \u2026" : "Speichern"),
+            /* @__PURE__ */ React.createElement("button", {
+              type: "button", onClick: () => { setOpen(false); setMsg(null); setPw(""); },
+              className: "w-full text-center text-xs font-medium",
+              style: { color: T.inkMuted, background: "transparent" }
+            }, "Abbrechen")
+          )
+        : /* @__PURE__ */ React.createElement("button", {
+            type: "button", onClick: () => setOpen(true),
+            className: "mb-2 min-h-12 w-full text-sm", style: ghostBtnBase
+          }, "Passwort \u00E4ndern"),
+      /* @__PURE__ */ React.createElement("button", {
+        type: "button", onClick: signOut,
+        className: "min-h-12 w-full text-sm",
+        style: { ...ghostBtnBase, color: T.alert, borderColor: "#F3D5CD" }
+      }, "Abmelden")
+    );
+  }
+
   function StatusButton({ status, active, onPick }) {
     const s = BY_ID[status];
     return /* @__PURE__ */ React.createElement(
@@ -485,7 +774,7 @@
       )
     )), /* @__PURE__ */ React.createElement("div", { className: "mt-3 flex items-center justify-between px-4 py-3 text-sm", style: { ...tile, color: T.inkSoft } }, /* @__PURE__ */ React.createElement("span", null, "Gesamtarbeitszeit"), /* @__PURE__ */ React.createElement("span", { className: "font-semibold tabular-nums", style: { color: T.ink } }, hasInput ? fmtMin(gesamt) : "")), hasInput && pause > 0 && /* @__PURE__ */ React.createElement("p", { className: "mt-2 text-xs", style: { color: T.inkMuted } }, "Ab ", pause === 45 ? 9 : 6, " h Gesamtarbeitszeit ", pause, " min Pause einplanen \u2014 zus\xE4tzlich zu diesen Zeiten."));
   }
-  function BueroQuote() {
+  function BueroQuote({ email }) {
     usePoppins();
     const today = useMemo(() => /* @__PURE__ */ new Date(), []);
     const todayKey = keyOf(today.getFullYear(), today.getMonth(), today.getDate());
@@ -668,28 +957,14 @@
       background: T.surface,
       fontWeight: 500
     };
-    return /* @__PURE__ */ React.createElement("div", { className: "min-h-screen pb-10", style: { background: T.bg, color: T.ink, fontFamily: FONT_STACK } }, /* @__PURE__ */ React.createElement("div", { className: "mx-auto max-w-md px-4 pt-5 sm:max-w-2xl" }, saveError && /* @__PURE__ */ React.createElement(
+    return /* @__PURE__ */ React.createElement("div", { className: "min-h-screen", style: { background: T.bg, color: T.ink, fontFamily: FONT_STACK, paddingBottom: "calc(96px + env(safe-area-inset-bottom))" } }, /* @__PURE__ */ React.createElement("div", { className: "mx-auto max-w-md px-4 pt-5 sm:max-w-2xl" }, saveError && /* @__PURE__ */ React.createElement(
       "div",
       {
         className: "mb-3 px-4 py-3 text-sm",
         style: { background: "#FDECEA", color: T.alert, borderRadius: T.radiusTile }
       },
       "\xC4nderung wurde nicht gespeichert. Pr\xFCfe die Verbindung und tippe den Tag erneut an."
-    ), /* @__PURE__ */ React.createElement("div", { className: "mb-4 flex justify-center" }, /* @__PURE__ */ React.createElement("div", { className: "flex gap-1 p-1", style: { background: T.tile, borderRadius: 999 } }, [
-      ["monat", "Monat"],
-      ["jahr", "Jahr"],
-      ["einstellungen", "Einstellungen"]
-    ].map(([id, label]) => /* @__PURE__ */ React.createElement(
-      "button",
-      {
-        key: id,
-        type: "button",
-        onClick: () => setTab(id),
-        className: "min-h-9 rounded-full px-4 text-xs transition",
-        style: tab === id ? { background: T.surface, color: T.ink, fontWeight: 600, boxShadow: T.shadow } : { background: "transparent", color: T.inkMuted, fontWeight: 500 }
-      },
-      label
-    )))), /* @__PURE__ */ React.createElement("div", { className: "p-5", style: card }, /* @__PURE__ */ React.createElement("div", { className: "flex items-center justify-between" }, /* @__PURE__ */ React.createElement(
+    ), /* @__PURE__ */ React.createElement("div", { className: "p-5", style: card }, /* @__PURE__ */ React.createElement("div", { className: "flex items-center justify-between" }, /* @__PURE__ */ React.createElement(
       "button",
       {
         type: "button",
@@ -881,7 +1156,42 @@
       "CSV ",
       cursor.y,
       " exportieren"
-    ))), /* @__PURE__ */ React.createElement(
+    ), /* @__PURE__ */ React.createElement(KontoBlock, { email }))), /* @__PURE__ */ React.createElement(
+      "nav",
+      {
+        className: "fixed inset-x-0 z-40 flex justify-center px-4",
+        style: { bottom: "calc(16px + env(safe-area-inset-bottom))" }
+      },
+      /* @__PURE__ */ React.createElement(
+        "div",
+        {
+          className: "flex gap-1 p-1",
+          style: {
+            background: "rgba(255,255,255,0.92)",
+            backdropFilter: "blur(12px)",
+            WebkitBackdropFilter: "blur(12px)",
+            borderRadius: 999,
+            boxShadow: "0 8px 30px rgba(15,27,45,0.14)",
+            border: `1px solid ${T.line}`
+          }
+        },
+        [
+          ["monat", "Monat"],
+          ["jahr", "Jahr"],
+          ["einstellungen", "Einstellungen"]
+        ].map(([id, label]) => /* @__PURE__ */ React.createElement(
+          "button",
+          {
+            key: id,
+            type: "button",
+            onClick: () => setTab(id),
+            className: "min-h-11 rounded-full px-5 text-sm transition",
+            style: tab === id ? { background: T.ink, color: "#FFFFFF", fontWeight: 600 } : { background: "transparent", color: T.inkMuted, fontWeight: 500 }
+          },
+          label
+        ))
+      )
+    ), /* @__PURE__ */ React.createElement(
       DaySheet,
       {
         day: sheetDay,
@@ -938,7 +1248,67 @@
       "Schlie\xDFen"
     ))));
   }
-  ReactDOM.createRoot(document.getElementById("root")).render(/* @__PURE__ */ React.createElement(BueroQuote, null));
+
+  /* ---------------------------------------------------------------- */
+  /* Einstieg: Session pr\u00FCfen, Daten laden, dann App zeigen        */
+  /* ---------------------------------------------------------------- */
+
+  function Root() {
+    const [session, setSession] = useState(null);
+    const [checking, setChecking] = useState(true);
+    const [needsPassword, setNeedsPassword] = useState(!!window.BQ_INVITE);
+    const [dataReady, setDataReady] = useState(false);
+    const [dataError, setDataError] = useState(null);
+
+    useEffect(() => {
+      let alive = true;
+      window.SB.auth.getSession().then(({ data }) => {
+        if (!alive) return;
+        setSession(data.session);
+        setChecking(false);
+      });
+      const { data: sub } = window.SB.auth.onAuthStateChange((event, s) => {
+        setSession(s);
+        if (event === "PASSWORD_RECOVERY") setNeedsPassword(true);
+        if (event === "SIGNED_OUT") { setNeedsPassword(false); setDataReady(false); }
+      });
+      return () => { alive = false; sub.subscription.unsubscribe(); };
+    }, []);
+
+    useEffect(() => {
+      if (!session || needsPassword || dataReady) return;
+      let alive = true;
+      window.BQStore.init(session.user.id)
+        .then(() => { if (alive) setDataReady(true); })
+        .catch((err) => { if (alive) setDataError(err.message || String(err)); });
+      return () => { alive = false; };
+    }, [session, needsPassword, dataReady]);
+
+    const spinner = /* @__PURE__ */ React.createElement("div", {
+      className: "flex min-h-screen items-center justify-center",
+      style: { background: T.bg }
+    }, /* @__PURE__ */ React.createElement("div", {
+      className: "h-8 w-8 animate-spin rounded-full",
+      style: { border: `2px solid ${T.line}`, borderTopColor: T.accent }
+    }));
+
+    if (checking) return spinner;
+    if (!session) return /* @__PURE__ */ React.createElement(AuthScreen, null);
+    if (needsPassword) return /* @__PURE__ */ React.createElement(SetPasswordScreen, { onDone: () => setNeedsPassword(false) });
+    if (dataError) return /* @__PURE__ */ React.createElement(Shell, { title: "Fehler" },
+      /* @__PURE__ */ React.createElement(Msg, { tone: "error" }, "Die Daten konnten nicht geladen werden: " + dataError),
+      /* @__PURE__ */ React.createElement("button", {
+        type: "button",
+        onClick: () => window.SB.auth.signOut(),
+        className: "min-h-12 w-full text-sm",
+        style: ghostBtnBase
+      }, "Abmelden")
+    );
+    if (!dataReady) return spinner;
+    return /* @__PURE__ */ React.createElement(BueroQuote, { email: session.user.email, key: session.user.id });
+  }
+
+  ReactDOM.createRoot(document.getElementById("root")).render(/* @__PURE__ */ React.createElement(Root, null));
 })();
 </script>
 </body>
