@@ -1,0 +1,1255 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="color-scheme" content="light" />
+<title>Büroanwesenheitsquote</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/@babel/standalone@7/babel.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<style>
+  html, body { background:#eef2ff; font-family: Poppins, "Avenir Next", "Nunito Sans", "Segoe UI", system-ui, -apple-system, sans-serif; }
+  input, select, button, textarea { font-family: inherit; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel" data-presets="react">
+/* ================================================================== */
+/*  KONFIGURATION – hier deine beiden Supabase-Werte eintragen         */
+/*  Project Settings → API                                            */
+/* ================================================================== */
+
+const SUPABASE_URL      = "HIER_PROJECT_URL_EINTRAGEN";   // z. B. https://abcdefgh.supabase.co
+const SUPABASE_ANON_KEY = "HIER_ANON_KEY_EINTRAGEN";      // langer Schlüssel, beginnt mit eyJ...
+
+/* ================================================================== */
+
+const { useState, useEffect, useMemo, useCallback, useRef } = React;
+
+const CONFIGURED =
+  SUPABASE_URL.startsWith("https://") && SUPABASE_ANON_KEY.length > 40;
+
+// Einladungs- bzw. Reset-Link erkennen, bevor supabase-js den Hash aufräumt
+const URL_HASH = window.location.hash || "";
+const URL_QUERY = window.location.search || "";
+const INVITE_FLOW =
+  /type=(invite|recovery|signup)/.test(URL_HASH) ||
+  /type=(invite|recovery|signup)/.test(URL_QUERY);
+
+const sb = CONFIGURED
+  ? window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+      auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true },
+    })
+  : null;
+
+/* ------------------------------------------------------------------ */
+/* Status-Definitionen                                                 */
+/* ------------------------------------------------------------------ */
+
+const STATUS = [
+  { id: "buero", label: "Büro", short: "Büro", cat: "A" },
+  { id: "berufsschule", label: "Berufsschule / Berufsakademie", short: "Schule", cat: "A" },
+  { id: "dienstreise", label: "Dienstreise", short: "Reise", cat: "A" },
+  { id: "seminar", label: "Seminar / Kurs / Lehrgang", short: "Seminar", cat: "A" },
+  { id: "dienstlich_abw", label: "Sonstige dienstliche Abwesenheit", short: "Dienstl.", cat: "A" },
+
+  { id: "mobil", label: "Mobiles Arbeiten", short: "Mobil", cat: "B" },
+
+  { id: "samstagsarbeit", label: "Samstagsarbeit", short: "Sa-Arbeit", cat: "C" },
+  { id: "urlaub", label: "Urlaub, Gleittag", short: "Urlaub", cat: "C" },
+  { id: "krank", label: "Krankheit, Reha, Kur", short: "Krank", cat: "C" },
+  { id: "sonstige_abw", label: "Sonstige Abwesenheit (z. B. Kinderkrankengeld)", short: "Sonstige", cat: "C" },
+  { id: "feiertag", label: "Feiertag", short: "Feiertag", cat: "C" },
+];
+
+const BY_ID = STATUS.reduce((acc, s) => ((acc[s.id] = s), acc), {});
+const QUICK = ["buero", "mobil", "urlaub", "krank"];
+const CAT_A = STATUS.filter((s) => s.cat === "A");
+const CAT_B = STATUS.filter((s) => s.cat === "B");
+const CAT_C = STATUS.filter((s) => s.cat === "C");
+
+const CAT_STYLE = {
+  A: "bg-emerald-100 text-emerald-800 border-emerald-200",
+  B: "bg-violet-100 text-violet-800 border-violet-200",
+  C: "bg-slate-100 text-slate-400 border-slate-200",
+};
+const CAT_DOT = { A: "bg-emerald-400", B: "bg-violet-500", C: "bg-slate-300" };
+const CAT_NAME = {
+  A: "Nicht mobiles Arbeiten – zählt als Anwesenheit",
+  B: "Mobiles Arbeiten – zählt zur Basis, nicht zum Zähler",
+  C: "Fällt komplett aus der Quote",
+};
+
+const WD_SHORT = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"];
+const MONTHS = ["Januar", "Februar", "März", "April", "Mai", "Juni", "Juli", "August", "September", "Oktober", "November", "Dezember"];
+const MONTHS_SHORT = ["Jan", "Feb", "Mär", "Apr", "Mai", "Jun", "Jul", "Aug", "Sep", "Okt", "Nov", "Dez"];
+
+const BASE_WEEK = { 1: "buero", 2: "buero", 3: "mobil", 4: "buero", 5: "mobil" };
+
+const DEFAULT_SETTINGS = {
+  target: 60,
+  weeks: [{ from: "0000-00", week: BASE_WEEK }],
+};
+
+const pad = (n) => String(n).padStart(2, "0");
+const monthKey = (y, m) => `${y}-${pad(m + 1)}`;
+const keyOf = (y, m, d) => `${y}-${pad(m + 1)}-${pad(d)}`;
+const deDate = (k) => {
+  const [y, m, d] = k.split("-");
+  return `${d}.${m}.${y}`;
+};
+const isoDow = (date) => (date.getDay() === 0 ? 7 : date.getDay());
+
+function weekForMonth(settings, y, m) {
+  const key = monthKey(y, m);
+  const list = (settings.weeks || []).filter((w) => w.from <= key).sort((a, b) => (a.from < b.from ? -1 : 1));
+  return list.length ? list[list.length - 1].week : BASE_WEEK;
+}
+
+function nextMonthOf(date) {
+  const y = date.getMonth() === 11 ? date.getFullYear() + 1 : date.getFullYear();
+  const m = date.getMonth() === 11 ? 0 : date.getMonth() + 1;
+  return { y, m, key: monthKey(y, m) };
+}
+
+/* ------------------------------------------------------------------ */
+/* Feiertage Hamburg                                                   */
+/* ------------------------------------------------------------------ */
+
+function easterSunday(year) {
+  const a = year % 19;
+  const b = Math.floor(year / 100);
+  const c = year % 100;
+  const d = Math.floor(b / 4);
+  const e = b % 4;
+  const f = Math.floor((b + 8) / 25);
+  const g = Math.floor((b - f + 1) / 3);
+  const h = (19 * a + b - d - g + 15) % 30;
+  const i = Math.floor(c / 4);
+  const k = c % 4;
+  const l = (32 + 2 * e + 2 * i - h - k) % 7;
+  const m = Math.floor((a + 11 * h + 22 * l) / 451);
+  const month = Math.floor((h + l - 7 * m + 114) / 31);
+  const day = ((h + l - 7 * m + 114) % 31) + 1;
+  return new Date(year, month - 1, day);
+}
+
+function shiftKey(date, days) {
+  const d = new Date(date.getFullYear(), date.getMonth(), date.getDate() + days);
+  return keyOf(d.getFullYear(), d.getMonth(), d.getDate());
+}
+
+function hamburgHolidays(year) {
+  const e = easterSunday(year);
+  return {
+    [keyOf(year, 0, 1)]: "Neujahr",
+    [shiftKey(e, -2)]: "Karfreitag",
+    [shiftKey(e, 1)]: "Ostermontag",
+    [keyOf(year, 4, 1)]: "Tag der Arbeit",
+    [shiftKey(e, 39)]: "Christi Himmelfahrt",
+    [shiftKey(e, 50)]: "Pfingstmontag",
+    [keyOf(year, 9, 3)]: "Tag der Deutschen Einheit",
+    [keyOf(year, 9, 31)]: "Reformationstag",
+    [keyOf(year, 11, 25)]: "1. Weihnachtstag",
+    [keyOf(year, 11, 26)]: "2. Weihnachtstag",
+  };
+}
+
+/* ------------------------------------------------------------------ */
+/* Berechnung                                                          */
+/* ------------------------------------------------------------------ */
+
+function resolveStatus(k, dow, overrides, defaultWeek, holidays) {
+  if (overrides[k]) return overrides[k];
+  if (holidays[k]) return "feiertag";
+  if (dow === 6 || dow === 7) return null;
+  return defaultWeek[dow] || null;
+}
+
+function buildMonth(year, month, overrides, defaultWeek, holidays) {
+  const days = [];
+  const total = new Date(year, month + 1, 0).getDate();
+  for (let d = 1; d <= total; d++) {
+    const date = new Date(year, month, d);
+    const dow = isoDow(date);
+    const k = keyOf(year, month, d);
+    const status = resolveStatus(k, dow, overrides, defaultWeek, holidays);
+    days.push({
+      key: k,
+      day: d,
+      dow,
+      date,
+      status,
+      cat: status ? BY_ID[status].cat : null,
+      holiday: holidays[k] || null,
+      manual: !!overrides[k],
+    });
+  }
+  return days;
+}
+
+function tally(days) {
+  let a = 0;
+  let b = 0;
+  for (const d of days) {
+    if (d.cat === "A") a++;
+    else if (d.cat === "B") b++;
+  }
+  const base = a + b;
+  return { a, b, base, quote: base ? (a / base) * 100 : null };
+}
+
+/* ------------------------------------------------------------------ */
+/* Bausteine                                                           */
+/* ------------------------------------------------------------------ */
+
+function Card({ children, className = "" }) {
+  return <div className={`rounded-3xl bg-white p-5 shadow-sm ${className}`}>{children}</div>;
+}
+
+function Field({ label, ...rest }) {
+  return (
+    <label className="block">
+      <span className="text-xs font-medium text-slate-500">{label}</span>
+      <input
+        {...rest}
+        className="mt-1 h-12 w-full rounded-2xl border border-slate-200 bg-slate-50 px-3 text-sm outline-none focus:border-violet-400 focus:ring-2 focus:ring-violet-200"
+      />
+    </label>
+  );
+}
+
+function PrimaryButton({ children, ...rest }) {
+  return (
+    <button
+      type="button"
+      {...rest}
+      className="min-h-12 w-full rounded-2xl bg-gradient-to-br from-fuchsia-500 to-violet-600 px-4 text-sm font-semibold text-white transition active:scale-95 disabled:opacity-50"
+    >
+      {children}
+    </button>
+  );
+}
+
+function Notice({ tone = "info", children }) {
+  const styles = {
+    info: "border-slate-200 bg-slate-50 text-slate-600",
+    error: "border-rose-200 bg-rose-50 text-rose-800",
+    ok: "border-emerald-200 bg-emerald-50 text-emerald-800",
+  };
+  return <div className={`rounded-2xl border px-3 py-2 text-sm leading-snug ${styles[tone]}`}>{children}</div>;
+}
+
+function StatusButton({ status, active, onPick }) {
+  const s = BY_ID[status];
+  return (
+    <button
+      type="button"
+      onClick={() => onPick(status)}
+      className={`flex min-h-12 w-full items-center gap-3 rounded-2xl border px-3 py-2 text-left text-sm transition active:scale-95 ${
+        active ? `${CAT_STYLE[s.cat]} ring-2 ring-slate-900` : `${CAT_STYLE[s.cat]} opacity-90`
+      }`}
+    >
+      <span className={`h-2.5 w-2.5 shrink-0 rounded-full ${CAT_DOT[s.cat]}`} />
+      <span className="leading-tight">{s.label}</span>
+      <span className="ml-auto text-xs font-semibold opacity-60">{s.cat}</span>
+    </button>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Tagesauswahl                                                        */
+/* ------------------------------------------------------------------ */
+
+function DaySheet({ day, defaultStatus, onPick, onReset, onClose }) {
+  if (!day) return null;
+  const isSaturday = day.dow === 6;
+  const isSunday = day.dow === 7;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-end justify-center" role="dialog" aria-modal="true">
+      <button type="button" aria-label="Schließen" onClick={onClose} className="absolute inset-0 bg-slate-900 opacity-40" />
+      <div className="relative max-h-full w-full max-w-md overflow-y-auto rounded-t-3xl bg-white p-5 pb-8 shadow-xl sm:mb-6 sm:rounded-3xl">
+        <div className="mb-1 flex items-start justify-between gap-3">
+          <div>
+            <div className="text-lg font-semibold text-slate-900">
+              {WD_SHORT[day.dow - 1]}, {deDate(day.key)}
+            </div>
+            <div className="text-xs text-slate-500">
+              {day.holiday
+                ? `Feiertag: ${day.holiday}`
+                : day.manual
+                ? "Manuell gesetzt"
+                : day.status
+                ? "Aus Standardwoche"
+                : "Kein Status"}
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="min-h-10 rounded-lg px-3 text-sm font-medium text-slate-600 hover:bg-slate-100"
+          >
+            Fertig
+          </button>
+        </div>
+
+        <div className="mb-4 mt-3 grid grid-cols-2 gap-2">
+          {QUICK.map((id) => {
+            const s = BY_ID[id];
+            return (
+              <button
+                key={id}
+                type="button"
+                onClick={() => onPick(id)}
+                className={`min-h-14 rounded-2xl border text-sm font-semibold transition active:scale-95 ${CAT_STYLE[s.cat]} ${
+                  day.status === id ? "ring-2 ring-slate-900" : ""
+                }`}
+              >
+                {s.short}
+              </button>
+            );
+          })}
+        </div>
+
+        {isSunday && (
+          <p className="mb-3 rounded-lg bg-slate-100 px-3 py-2 text-xs text-slate-600">
+            Sonntage bleiben normalerweise leer.
+          </p>
+        )}
+        {isSaturday && (
+          <p className="mb-3 rounded-lg bg-slate-100 px-3 py-2 text-xs text-slate-600">
+            Samstagsarbeit zählt weder zum Zähler noch zur Basis.
+          </p>
+        )}
+
+        {[["A", CAT_A], ["B", CAT_B], ["C", CAT_C]].map(([cat, list]) => (
+          <div key={cat} className="mb-4">
+            <div className="mb-2 flex items-baseline gap-2">
+              <span className={`inline-flex h-5 w-5 items-center justify-center rounded text-xs font-bold text-white ${CAT_DOT[cat]}`}>
+                {cat}
+              </span>
+              <span className="text-xs text-slate-500">{CAT_NAME[cat]}</span>
+            </div>
+            <div className="space-y-2">
+              {list.map((s) => (
+                <StatusButton key={s.id} status={s.id} active={day.status === s.id} onPick={onPick} />
+              ))}
+            </div>
+          </div>
+        ))}
+
+        <button
+          type="button"
+          onClick={onReset}
+          className="min-h-12 w-full rounded-2xl border border-slate-200 px-3 text-sm font-medium text-slate-600 hover:bg-slate-50"
+        >
+          {defaultStatus ? `Zurück zum Standard (${BY_ID[defaultStatus].short})` : "Status entfernen (leer)"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Bürotag-Rechner                                                     */
+/* ------------------------------------------------------------------ */
+
+const DAY_THRESHOLD = 0.6;
+const PAUSE_STUFEN = [
+  { abMin: 540, pause: 45 },
+  { abMin: 360, pause: 30 },
+];
+function pauseFor(min) {
+  const stufe = PAUSE_STUFEN.find((s) => min >= s.abMin);
+  return stufe ? stufe.pause : 0;
+}
+function fmtMin(total) {
+  const h = Math.floor(total / 60);
+  const m = total % 60;
+  return `${h}:${pad(m)} h`;
+}
+
+function BueroTagRechner() {
+  const [h, setH] = useState("");
+  const [m, setM] = useState("");
+
+  const officeMin = Math.max(0, (Number(h) || 0) * 60 + (Number(m) || 0));
+  const maxHome = Math.floor((officeMin * (1 - DAY_THRESHOLD)) / DAY_THRESHOLD);
+  const gesamt = officeMin + maxHome;
+  const pause = pauseFor(gesamt);
+  const hasInput = officeMin > 0;
+
+  return (
+    <div>
+      <div className="mb-3 text-center text-sm font-semibold text-slate-700">Zählt der Tag als Bürotag?</div>
+
+      <div className="grid grid-cols-2 gap-3">
+        <div className="rounded-2xl border border-slate-200 p-3">
+          <label className="text-xs font-medium text-slate-500" htmlFor="bh">
+            Arbeitszeit im Büro
+          </label>
+          <div className="mt-2 flex items-center gap-1">
+            <input
+              id="bh"
+              type="number"
+              inputMode="numeric"
+              min="0"
+              max="24"
+              placeholder="0"
+              value={h}
+              onChange={(e) => setH(e.target.value)}
+              className="h-12 w-full rounded-xl border border-slate-200 bg-slate-50 px-2 text-center text-lg tabular-nums"
+            />
+            <span className="text-sm text-slate-400">h</span>
+            <input
+              type="number"
+              inputMode="numeric"
+              min="0"
+              max="59"
+              placeholder="00"
+              value={m}
+              onChange={(e) => setM(e.target.value)}
+              className="h-12 w-full rounded-xl border border-slate-200 bg-slate-50 px-2 text-center text-lg tabular-nums"
+              aria-label="Minuten im Büro"
+            />
+            <span className="text-sm text-slate-400">min</span>
+          </div>
+        </div>
+
+        <div
+          className={`rounded-2xl p-3 ${
+            hasInput
+              ? "bg-gradient-to-br from-fuchsia-500 to-violet-600 text-white"
+              : "border border-slate-200 bg-slate-50 text-slate-400"
+          }`}
+        >
+          <div className="text-xs font-medium opacity-80">Maximal zuhause</div>
+          <div className="mt-2 flex h-12 items-center text-3xl font-bold tabular-nums">
+            {hasInput ? fmtMin(maxHome) : ""}
+          </div>
+        </div>
+      </div>
+
+      <div className="mt-3 flex items-center justify-between rounded-2xl bg-slate-50 px-4 py-3 text-sm text-slate-600">
+        <span>Gesamtarbeitszeit</span>
+        <span className="font-semibold tabular-nums">{hasInput ? fmtMin(gesamt) : ""}</span>
+      </div>
+
+      {hasInput && pause > 0 && (
+        <p className="mt-2 text-xs text-slate-500">
+          Ab {pause === 45 ? 9 : 6} h Gesamtarbeitszeit {pause} min Pause einplanen — zusätzlich zu diesen Zeiten.
+        </p>
+      )}
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Anmeldung                                                           */
+/* ------------------------------------------------------------------ */
+
+function AuthScreen({ onDone }) {
+  const [mode, setMode] = useState("login"); // login | reset
+  const [email, setEmail] = useState("");
+  const [pw, setPw] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState(null);
+
+  const login = async () => {
+    setBusy(true);
+    setMsg(null);
+    const { error } = await sb.auth.signInWithPassword({ email: email.trim(), password: pw });
+    setBusy(false);
+    if (error) setMsg({ tone: "error", text: "Anmeldung fehlgeschlagen. Prüfe E-Mail und Passwort." });
+    else onDone();
+  };
+
+  const reset = async () => {
+    setBusy(true);
+    setMsg(null);
+    const { error } = await sb.auth.resetPasswordForEmail(email.trim(), {
+      redirectTo: window.location.origin + window.location.pathname,
+    });
+    setBusy(false);
+    setMsg(
+      error
+        ? { tone: "error", text: "Die E-Mail konnte nicht versendet werden. Versuch es später erneut." }
+        : { tone: "ok", text: "E-Mail ist unterwegs. Sieh auch im Spam-Ordner nach." }
+    );
+  };
+
+  return (
+    <div className="mx-auto max-w-sm px-4 py-16">
+      <div className="mb-6 text-center">
+        <div className="text-3xl font-extrabold tracking-tight text-slate-900">Büroquote</div>
+        <p className="mt-1 text-sm text-slate-500">Melde dich an, um deine Tage zu sehen.</p>
+      </div>
+
+      <Card className="space-y-3">
+        <Field
+          label="E-Mail"
+          type="email"
+          autoComplete="username"
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+        />
+        {mode === "login" && (
+          <Field
+            label="Passwort"
+            type="password"
+            autoComplete="current-password"
+            value={pw}
+            onChange={(e) => setPw(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && login()}
+          />
+        )}
+
+        {msg && <Notice tone={msg.tone}>{msg.text}</Notice>}
+
+        {mode === "login" ? (
+          <>
+            <PrimaryButton onClick={login} disabled={busy || !email || !pw}>
+              {busy ? "Anmelden …" : "Anmelden"}
+            </PrimaryButton>
+            <button
+              type="button"
+              onClick={() => { setMode("reset"); setMsg(null); }}
+              className="w-full text-center text-xs font-medium text-violet-600 hover:underline"
+            >
+              Passwort vergessen
+            </button>
+          </>
+        ) : (
+          <>
+            <PrimaryButton onClick={reset} disabled={busy || !email}>
+              {busy ? "Senden …" : "Link zum Zurücksetzen senden"}
+            </PrimaryButton>
+            <button
+              type="button"
+              onClick={() => { setMode("login"); setMsg(null); }}
+              className="w-full text-center text-xs font-medium text-slate-500 hover:underline"
+            >
+              Zurück zur Anmeldung
+            </button>
+          </>
+        )}
+      </Card>
+    </div>
+  );
+}
+
+function SetPasswordScreen({ onDone }) {
+  const [pw, setPw] = useState("");
+  const [pw2, setPw2] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState(null);
+
+  const short = pw.length > 0 && pw.length < 8;
+  const mismatch = pw2.length > 0 && pw !== pw2;
+
+  const save = async () => {
+    setBusy(true);
+    setMsg(null);
+    const { error } = await sb.auth.updateUser({ password: pw });
+    setBusy(false);
+    if (error) setMsg({ tone: "error", text: "Das Passwort wurde nicht gesetzt: " + error.message });
+    else onDone();
+  };
+
+  return (
+    <div className="mx-auto max-w-sm px-4 py-16">
+      <div className="mb-6 text-center">
+        <div className="text-3xl font-extrabold tracking-tight text-slate-900">Passwort festlegen</div>
+        <p className="mt-1 text-sm text-slate-500">Danach meldest du dich damit immer an.</p>
+      </div>
+
+      <Card className="space-y-3">
+        <Field label="Neues Passwort" type="password" autoComplete="new-password" value={pw} onChange={(e) => setPw(e.target.value)} />
+        <Field label="Wiederholen" type="password" autoComplete="new-password" value={pw2} onChange={(e) => setPw2(e.target.value)} />
+        {short && <Notice tone="error">Mindestens 8 Zeichen.</Notice>}
+        {mismatch && <Notice tone="error">Die beiden Eingaben stimmen nicht überein.</Notice>}
+        {msg && <Notice tone={msg.tone}>{msg.text}</Notice>}
+        <PrimaryButton onClick={save} disabled={busy || pw.length < 8 || pw !== pw2}>
+          {busy ? "Speichern …" : "Passwort speichern"}
+        </PrimaryButton>
+      </Card>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Hauptansicht                                                        */
+/* ------------------------------------------------------------------ */
+
+function App({ session, onSignOut }) {
+  const today = useMemo(() => new Date(), []);
+  const todayKey = keyOf(today.getFullYear(), today.getMonth(), today.getDate());
+  const userId = session.user.id;
+
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(null);
+  const [saveState, setSaveState] = useState("idle"); // idle | saving | saved | error
+  const [savedAt, setSavedAt] = useState(null);
+  const [settings, setSettings] = useState(DEFAULT_SETTINGS);
+  const [yearData, setYearData] = useState({});
+  const [cursor, setCursor] = useState({ y: today.getFullYear(), m: today.getMonth() });
+  const [sheetKey, setSheetKey] = useState(null);
+  const [tab, setTab] = useState("monat");
+  const [csvText, setCsvText] = useState(null);
+
+  const ready = useRef(false);
+  const timer = useRef(null);
+
+  /* --- Laden --------------------------------------------------------- */
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      const { data, error } = await sb.from("attendance").select("data").eq("user_id", userId).maybeSingle();
+      if (!alive) return;
+      if (error) {
+        setLoadError("Die Daten konnten nicht geladen werden: " + error.message);
+        setLoading(false);
+        return;
+      }
+      const payload = (data && data.data) || {};
+      const s = payload.settings;
+      if (s) {
+        const weeks = s.weeks || [{ from: "0000-00", week: { ...BASE_WEEK, ...(s.defaultWeek || {}) } }];
+        setSettings({ target: s.target ?? DEFAULT_SETTINGS.target, weeks });
+      }
+      setYearData(payload.years || {});
+      setLoading(false);
+      ready.current = true;
+    })();
+    return () => { alive = false; };
+  }, [userId]);
+
+  /* --- Speichern (entprellt) ----------------------------------------- */
+  useEffect(() => {
+    if (!ready.current) return;
+    setSaveState("saving");
+    if (timer.current) clearTimeout(timer.current);
+    timer.current = setTimeout(async () => {
+      const payload = { settings, years: yearData, v: 1 };
+      const { error } = await sb
+        .from("attendance")
+        .upsert({ user_id: userId, data: payload, updated_at: new Date().toISOString() }, { onConflict: "user_id" });
+      if (error) {
+        setSaveState("error");
+      } else {
+        setSaveState("saved");
+        setSavedAt(new Date());
+      }
+    }, 700);
+    return () => { if (timer.current) clearTimeout(timer.current); };
+  }, [settings, yearData, userId]);
+
+  // Vor dem Schließen warnen, solange noch nicht gespeichert wurde
+  useEffect(() => {
+    const handler = (e) => {
+      if (saveState === "saving" || saveState === "error") {
+        e.preventDefault();
+        e.returnValue = "";
+      }
+    };
+    window.addEventListener("beforeunload", handler);
+    return () => window.removeEventListener("beforeunload", handler);
+  }, [saveState]);
+
+  const overrides = yearData[cursor.y] || {};
+  const holidays = useMemo(() => hamburgHolidays(cursor.y), [cursor.y]);
+
+  const writeDay = useCallback((k, status) => {
+    const y = Number(k.slice(0, 4));
+    setYearData((prev) => {
+      const next = { ...(prev[y] || {}) };
+      if (status) next[k] = status;
+      else delete next[k];
+      return { ...prev, [y]: next };
+    });
+  }, []);
+
+  const eff = useMemo(() => nextMonthOf(today), [today]);
+  const effWeek = useMemo(() => weekForMonth(settings, eff.y, eff.m), [settings, eff]);
+
+  const writeWeekDay = useCallback((dow, value) => {
+    setSettings((prev) => {
+      const week = { ...weekForMonth(prev, eff.y, eff.m), [dow]: value };
+      const weeks = [...(prev.weeks || []).filter((w) => w.from !== eff.key), { from: eff.key, week }].sort((a, b) =>
+        a.from < b.from ? -1 : 1
+      );
+      return { ...prev, weeks };
+    });
+  }, [eff]);
+
+  const days = useMemo(
+    () => buildMonth(cursor.y, cursor.m, overrides, weekForMonth(settings, cursor.y, cursor.m), holidays),
+    [cursor.y, cursor.m, overrides, settings, holidays]
+  );
+
+  const prog = useMemo(() => tally(days), [days]);
+  const target = settings.target;
+  const t = target / 100;
+
+  const need = Math.max(0, Math.ceil(t * prog.base - prog.a - 1e-9));
+  const puffer = Math.max(0, Math.floor(prog.a - t * prog.base + 1e-9));
+  const futureB = days.filter((d) => d.cat === "B" && d.key > todayKey).length;
+
+  const toneOf = (q) => (q === null ? "neutral" : q >= target - 1e-9 ? "gut" : q >= target - 5 ? "knapp" : "kritisch");
+  const TONE_TEXT = {
+    gut: "text-emerald-500",
+    knapp: "text-amber-500",
+    kritisch: "text-fuchsia-600",
+    neutral: "text-slate-300",
+  };
+  const toneClass = TONE_TEXT[toneOf(prog.quote)];
+
+  let hint;
+  if (prog.base === 0) hint = "Für diesen Monat sind noch keine A- oder B-Tage erfasst.";
+  else if (need > 0 && need <= futureB)
+    hint = `Noch ${need} ${need === 1 ? "Bürotag" : "Bürotage"} nötig für ${target} % – wandle ${need} der ${futureB} verbleibenden mobilen Tage um.`;
+  else if (need > 0)
+    hint = `${target} % sind diesen Monat nicht mehr erreichbar: ${need} ${need === 1 ? "Tag" : "Tage"} müssten von mobil auf Büro wechseln, es sind aber nur noch ${futureB} mobile Tage offen.`;
+  else if (puffer > 0)
+    hint = `Puffer: ${puffer} ${puffer === 1 ? "Tag" : "Tage"} – du kannst ${puffer}× zusätzlich mobil arbeiten.`;
+  else hint = `${target} % genau erreicht – kein Puffer, jeder weitere mobile Tag reißt das Ziel.`;
+
+  const yearStats = useMemo(() => {
+    const rows = [];
+    let a = 0, b = 0, aIst = 0, bIst = 0;
+    for (let m = 0; m < 12; m++) {
+      const md = buildMonth(cursor.y, m, overrides, weekForMonth(settings, cursor.y, m), holidays);
+      const s = tally(md);
+      const si = tally(md.filter((d) => d.key <= todayKey));
+      a += s.a; b += s.b; aIst += si.a; bIst += si.b;
+      rows.push({ m, ...s, future: md.length > 0 && md[0].key > todayKey });
+    }
+    return {
+      rows,
+      total: { a, b, base: a + b, quote: a + b ? (a / (a + b)) * 100 : null },
+      istTotal: { a: aIst, b: bIst, base: aIst + bIst, quote: aIst + bIst ? (aIst / (aIst + bIst)) * 100 : null },
+    };
+  }, [cursor.y, overrides, settings, holidays, todayKey]);
+
+  const buildCsv = () => {
+    const lines = ["Datum;Status;Kategorie"];
+    for (let m = 0; m < 12; m++) {
+      for (const d of buildMonth(cursor.y, m, overrides, weekForMonth(settings, cursor.y, m), holidays)) {
+        if (!d.status) continue;
+        lines.push(`${deDate(d.key)};${BY_ID[d.status].label};${d.cat}`);
+      }
+    }
+    return lines.join("\n");
+  };
+
+  const exportCsv = () => {
+    const csv = buildCsv();
+    try {
+      const blob = new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `anwesenheit-${cursor.y}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (err) {
+      setCsvText(csv);
+    }
+  };
+
+  const step = (delta) => {
+    setCursor((c) => {
+      const m = c.m + delta;
+      if (m < 0) return { y: c.y - 1, m: 11 };
+      if (m > 11) return { y: c.y + 1, m: 0 };
+      return { y: c.y, m };
+    });
+  };
+
+  const sheetDay = sheetKey ? days.find((d) => d.key === sheetKey) : null;
+  const sheetDefault = sheetDay
+    ? holidays[sheetDay.key]
+      ? "feiertag"
+      : sheetDay.dow <= 5
+      ? weekForMonth(settings, cursor.y, cursor.m)[sheetDay.dow] || null
+      : null
+    : null;
+
+  if (loading) {
+    return (
+      <div className="flex min-h-screen items-center justify-center p-8">
+        <div className="text-center">
+          <div className="mx-auto mb-3 h-8 w-8 animate-spin rounded-full border-2 border-slate-300 border-t-slate-800" />
+          <p className="text-sm text-slate-500">Daten werden geladen …</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (loadError) {
+    return (
+      <div className="mx-auto max-w-sm px-4 py-16">
+        <Card className="space-y-3">
+          <Notice tone="error">{loadError}</Notice>
+          <button
+            type="button"
+            onClick={onSignOut}
+            className="min-h-12 w-full rounded-2xl border border-slate-200 text-sm font-medium text-slate-600"
+          >
+            Abmelden
+          </button>
+        </Card>
+      </div>
+    );
+  }
+
+  const leading = (days[0].dow + 6) % 7;
+
+  const saveLabel = {
+    idle: "",
+    saving: "Speichert …",
+    saved: savedAt ? `Gespeichert ${pad(savedAt.getHours())}:${pad(savedAt.getMinutes())}` : "Gespeichert",
+    error: "Nicht gespeichert",
+  }[saveState];
+
+  return (
+    <div className="min-h-screen pb-10 text-slate-900">
+      <div className="mx-auto max-w-md px-3 pt-4 sm:max-w-2xl">
+        {saveState === "error" && (
+          <div className="mb-3 rounded-2xl border border-rose-300 bg-rose-50 px-3 py-2 text-sm text-rose-800">
+            Die letzte Änderung liegt nur lokal vor. Prüfe die Verbindung – die App versucht es bei der nächsten
+            Änderung erneut.
+          </div>
+        )}
+
+        <div className="mb-3 flex items-center justify-between">
+          <span className="text-xs text-slate-400">{saveLabel}</span>
+          <div className="flex gap-1">
+            {[["monat", "Monat"], ["jahr", "Jahr"], ["einstellungen", "Einstellungen"]].map(([id, label]) => (
+              <button
+                key={id}
+                type="button"
+                onClick={() => setTab(id)}
+                className={`min-h-9 rounded-full px-3 text-xs font-medium transition ${
+                  tab === id ? "bg-white text-slate-900 shadow-sm" : "text-slate-400 hover:text-slate-600"
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Kopf: Quote ------------------------------------------------- */}
+        <Card>
+          <div className="flex items-center justify-between">
+            <button
+              type="button"
+              onClick={() => step(-1)}
+              aria-label="Vorheriger Monat"
+              className="flex h-11 w-11 items-center justify-center rounded-xl text-xl text-slate-600 hover:bg-slate-100"
+            >
+              ‹
+            </button>
+            <div className="text-center">
+              <div className="text-sm font-medium text-slate-500">
+                {MONTHS[cursor.m]} {cursor.y}
+              </div>
+              {(cursor.y !== today.getFullYear() || cursor.m !== today.getMonth()) && (
+                <button
+                  type="button"
+                  onClick={() => setCursor({ y: today.getFullYear(), m: today.getMonth() })}
+                  className="mt-0.5 rounded-full px-2 py-0.5 text-xs font-medium text-violet-600 hover:bg-violet-50"
+                >
+                  Heute
+                </button>
+              )}
+            </div>
+            <button
+              type="button"
+              onClick={() => step(1)}
+              aria-label="Nächster Monat"
+              className="flex h-11 w-11 items-center justify-center rounded-xl text-xl text-slate-600 hover:bg-slate-100"
+            >
+              ›
+            </button>
+          </div>
+
+          <div className="mt-2 text-center">
+            <div className={`text-6xl font-extrabold tracking-tight tabular-nums ${toneClass}`}>
+              {prog.quote === null ? "–" : `${prog.quote.toFixed(0)} %`}
+            </div>
+            <div className="mt-1 text-sm text-slate-500">
+              {prog.a} von {prog.base} Tagen
+            </div>
+          </div>
+
+          <p className="mt-4 rounded-2xl bg-slate-50 px-4 py-3 text-sm leading-snug text-slate-600">{hint}</p>
+        </Card>
+
+        {/* Monat ------------------------------------------------------- */}
+        {tab === "monat" && (
+          <div className="mt-3 rounded-3xl bg-white p-3 shadow-sm">
+            <div className="mb-1 grid grid-cols-7 gap-1 text-center text-xs font-medium text-slate-400">
+              {WD_SHORT.map((w) => (
+                <div key={w} className="py-1">{w}</div>
+              ))}
+            </div>
+            <div className="grid grid-cols-7 gap-1">
+              {Array.from({ length: leading }).map((_, i) => (
+                <div key={`pad-${i}`} />
+              ))}
+              {days.map((d) => {
+                const isToday = d.key === todayKey;
+                const base = d.cat ? CAT_STYLE[d.cat] : "bg-white text-slate-300 border-slate-200";
+                return (
+                  <button
+                    key={d.key}
+                    type="button"
+                    onClick={() => setSheetKey(d.key)}
+                    className={`flex min-h-16 flex-col items-start justify-between rounded-xl border p-1 text-left transition active:scale-95 ${base} ${
+                      isToday ? "ring-2 ring-slate-900" : ""
+                    }`}
+                  >
+                    <span className="flex w-full items-center justify-between text-xs font-semibold tabular-nums">
+                      {d.day}
+                      {d.manual && <span className="h-1.5 w-1.5 rounded-full bg-slate-900 opacity-50" />}
+                    </span>
+                    <span className="w-full break-words text-xs leading-tight">
+                      {d.status ? BY_ID[d.status].short : ""}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {tab === "monat" && (
+          <Card className="mt-3">
+            <BueroTagRechner />
+          </Card>
+        )}
+
+        {/* Jahr -------------------------------------------------------- */}
+        {tab === "jahr" && (
+          <Card className="mt-3">
+            <div className="flex items-baseline justify-between">
+              <h2 className="text-sm font-semibold text-slate-700">Jahresübersicht {cursor.y}</h2>
+              <button
+                type="button"
+                onClick={exportCsv}
+                className="min-h-10 rounded-2xl border border-slate-200 px-3 text-sm font-medium text-slate-600 hover:bg-slate-50"
+              >
+                CSV exportieren
+              </button>
+            </div>
+
+            <div className="relative mt-4 h-44">
+              <div className="absolute left-0 right-0 border-t-2 border-dashed border-slate-400" style={{ bottom: `${target}%` }}>
+                <span className="absolute right-0 -top-4 text-xs font-medium text-slate-500">{target} %</span>
+              </div>
+              <div className="flex h-full items-end gap-1">
+                {yearStats.rows.map((r) => {
+                  const h = r.quote === null ? 0 : r.quote;
+                  const good = r.quote !== null && r.quote >= target - 1e-9;
+                  return (
+                    <button
+                      key={r.m}
+                      type="button"
+                      onClick={() => setCursor((c) => ({ ...c, m: r.m }))}
+                      className="group flex h-full flex-1 flex-col justify-end"
+                      title={`${MONTHS[r.m]}: ${r.a} / ${r.base}`}
+                    >
+                      <div
+                        className={`w-full rounded-t ${
+                          r.quote === null
+                            ? "bg-slate-200"
+                            : good
+                            ? "bg-gradient-to-b from-emerald-300 to-emerald-500"
+                            : "bg-gradient-to-b from-fuchsia-400 to-violet-600"
+                        } ${r.future ? "opacity-40" : ""}`}
+                        style={{ height: `${Math.max(2, h)}%` }}
+                      />
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+            <div className="mt-1 flex gap-1">
+              {MONTHS_SHORT.map((m) => (
+                <div key={m} className="flex-1 text-center text-xs text-slate-400">{m[0]}</div>
+              ))}
+            </div>
+
+            <div className="mt-4 grid grid-cols-2 gap-2">
+              <div className="rounded-2xl bg-slate-50 p-4">
+                <div className="text-xs text-slate-500">Kumuliert bis heute</div>
+                <div className="text-2xl font-bold tabular-nums">
+                  {yearStats.istTotal.quote === null ? "–" : `${yearStats.istTotal.quote.toFixed(1)} %`}
+                </div>
+                <div className="text-xs text-slate-500">
+                  {yearStats.istTotal.a} / {yearStats.istTotal.base} Tage
+                </div>
+              </div>
+              <div className="rounded-2xl bg-slate-50 p-4">
+                <div className="text-xs text-slate-500">Prognose Jahresende</div>
+                <div className="text-2xl font-bold tabular-nums">
+                  {yearStats.total.quote === null ? "–" : `${yearStats.total.quote.toFixed(1)} %`}
+                </div>
+                <div className="text-xs text-slate-500">
+                  {yearStats.total.a} / {yearStats.total.base} Tage
+                </div>
+              </div>
+            </div>
+            <p className="mt-2 text-xs text-slate-400">
+              Jahresquote = Summe A geteilt durch Summe A+B über alle Monate, nicht der Durchschnitt der Monatsquoten.
+            </p>
+
+            <div className="mt-4 space-y-1">
+              {yearStats.rows.map((r) => (
+                <div key={r.m} className="flex items-center justify-between border-b border-slate-100 py-1 text-sm">
+                  <span className="text-slate-600">{MONTHS[r.m]}</span>
+                  <span className="tabular-nums text-slate-500">
+                    {r.a} / {r.base}
+                    <span
+                      className={`ml-3 font-semibold ${
+                        r.quote === null ? "text-slate-400" : r.quote >= target ? "text-emerald-500" : "text-fuchsia-600"
+                      }`}
+                    >
+                      {r.quote === null ? "–" : `${r.quote.toFixed(0)} %`}
+                    </span>
+                  </span>
+                </div>
+              ))}
+            </div>
+          </Card>
+        )}
+
+        {/* Einstellungen ---------------------------------------------- */}
+        {tab === "einstellungen" && (
+          <Card className="mt-3 space-y-4">
+            <div>
+              <label className="text-sm font-semibold text-slate-700" htmlFor="ziel">Zielquote</label>
+              <div className="mt-2 flex items-center gap-3">
+                <input
+                  id="ziel"
+                  type="number"
+                  min="0"
+                  max="100"
+                  step="1"
+                  value={target}
+                  onChange={(e) => {
+                    const v = Math.max(0, Math.min(100, Number(e.target.value) || 0));
+                    setSettings((prev) => ({ ...prev, target: v }));
+                  }}
+                  className="h-12 w-24 rounded-2xl border border-slate-200 bg-slate-50 px-3 text-lg tabular-nums"
+                />
+                <span className="text-slate-500">%</span>
+              </div>
+            </div>
+
+            <div>
+              <div className="text-sm font-semibold text-slate-700">Standardwoche</div>
+              <p className="mb-2 text-xs text-slate-500">
+                Gilt ab {MONTHS[eff.m]} {eff.y}. Der laufende Monat bleibt unverändert. Feiertage überschreiben die
+                Vorbelegung automatisch.
+              </p>
+              <div className="space-y-2">
+                {[1, 2, 3, 4, 5].map((dow) => {
+                  const sel = effWeek[dow];
+                  const style = sel ? CAT_STYLE[BY_ID[sel].cat] : "border-slate-200 bg-slate-50 text-slate-400";
+                  return (
+                    <div key={dow} className="flex items-center gap-3">
+                      <span className="w-8 text-sm font-medium text-slate-600">{WD_SHORT[dow - 1]}</span>
+                      <select
+                        value={sel || ""}
+                        onChange={(e) => writeWeekDay(dow, e.target.value || null)}
+                        className={`h-12 flex-1 rounded-2xl border px-3 text-sm font-medium ${style}`}
+                      >
+                        <option value="">— leer —</option>
+                        {[...CAT_A, ...CAT_B].map((s) => (
+                          <option key={s.id} value={s.id}>
+                            {s.label} ({s.cat})
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="rounded-2xl bg-slate-50 p-4 text-xs leading-relaxed text-slate-500">
+              <div className="mb-1 font-semibold text-slate-700">So wird gerechnet</div>
+              Quote = Summe A / (Summe A + Summe B). Basis sind ausschließlich die erfassten A- und B-Tage, nicht die
+              Kalenderarbeitstage. Alle C-Tage fallen komplett heraus.
+            </div>
+
+            <button
+              type="button"
+              onClick={exportCsv}
+              className="min-h-12 w-full rounded-2xl border border-slate-200 text-sm font-medium text-slate-600 hover:bg-slate-50"
+            >
+              CSV {cursor.y} exportieren (Datum, Status, Kategorie)
+            </button>
+
+            <PasswordChange />
+
+            <div className="border-t border-slate-100 pt-4">
+              <div className="mb-2 text-xs text-slate-500">Angemeldet als {session.user.email}</div>
+              <button
+                type="button"
+                onClick={onSignOut}
+                className="min-h-12 w-full rounded-2xl border border-slate-200 text-sm font-medium text-slate-600 hover:bg-slate-50"
+              >
+                Abmelden
+              </button>
+            </div>
+          </Card>
+        )}
+      </div>
+
+      <DaySheet
+        day={sheetDay}
+        defaultStatus={sheetDefault}
+        onPick={(status) => { writeDay(sheetDay.key, status); setSheetKey(null); }}
+        onReset={() => { writeDay(sheetDay.key, null); setSheetKey(null); }}
+        onClose={() => setSheetKey(null)}
+      />
+
+      {csvText !== null && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <button type="button" aria-label="Schließen" onClick={() => setCsvText(null)} className="absolute inset-0 bg-slate-900 opacity-40" />
+          <div className="relative w-full max-w-md rounded-3xl bg-white p-5 shadow-xl">
+            <div className="mb-2 text-sm font-semibold">Download nicht möglich – Text kopieren</div>
+            <textarea readOnly value={csvText} className="h-64 w-full rounded-xl border border-slate-300 p-2 text-xs" />
+            <button
+              type="button"
+              onClick={() => setCsvText(null)}
+              className="mt-3 min-h-12 w-full rounded-xl bg-slate-900 text-sm font-medium text-white"
+            >
+              Schließen
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PasswordChange() {
+  const [open, setOpen] = useState(false);
+  const [pw, setPw] = useState("");
+  const [msg, setMsg] = useState(null);
+  const [busy, setBusy] = useState(false);
+
+  const save = async () => {
+    setBusy(true);
+    setMsg(null);
+    const { error } = await sb.auth.updateUser({ password: pw });
+    setBusy(false);
+    if (error) setMsg({ tone: "error", text: error.message });
+    else {
+      setMsg({ tone: "ok", text: "Passwort geändert." });
+      setPw("");
+    }
+  };
+
+  if (!open)
+    return (
+      <button
+        type="button"
+        onClick={() => setOpen(true)}
+        className="min-h-12 w-full rounded-2xl border border-slate-200 text-sm font-medium text-slate-600 hover:bg-slate-50"
+      >
+        Passwort ändern
+      </button>
+    );
+
+  return (
+    <div className="space-y-2 rounded-2xl border border-slate-200 p-4">
+      <Field label="Neues Passwort" type="password" autoComplete="new-password" value={pw} onChange={(e) => setPw(e.target.value)} />
+      {msg && <Notice tone={msg.tone}>{msg.text}</Notice>}
+      <PrimaryButton onClick={save} disabled={busy || pw.length < 8}>
+        {busy ? "Speichern …" : "Speichern"}
+      </PrimaryButton>
+      <button
+        type="button"
+        onClick={() => { setOpen(false); setMsg(null); setPw(""); }}
+        className="w-full text-center text-xs font-medium text-slate-500 hover:underline"
+      >
+        Abbrechen
+      </button>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Einstieg                                                            */
+/* ------------------------------------------------------------------ */
+
+function Root() {
+  const [session, setSession] = useState(null);
+  const [checking, setChecking] = useState(true);
+  const [needsPassword, setNeedsPassword] = useState(INVITE_FLOW);
+
+  useEffect(() => {
+    if (!CONFIGURED) { setChecking(false); return; }
+    let alive = true;
+    sb.auth.getSession().then(({ data }) => {
+      if (!alive) return;
+      setSession(data.session);
+      setChecking(false);
+    });
+    const { data: sub } = sb.auth.onAuthStateChange((event, s) => {
+      setSession(s);
+      if (event === "PASSWORD_RECOVERY") setNeedsPassword(true);
+      if (event === "SIGNED_OUT") setNeedsPassword(false);
+    });
+    return () => { alive = false; sub.subscription.unsubscribe(); };
+  }, []);
+
+  if (!CONFIGURED) {
+    return (
+      <div className="mx-auto max-w-sm px-4 py-16">
+        <Card className="space-y-3">
+          <div className="text-lg font-semibold">Konfiguration fehlt</div>
+          <p className="text-sm text-slate-600">
+            Trage oben in der Datei <code className="rounded bg-slate-100 px-1">index.html</code> deine Supabase
+            Project URL und den anon key ein. Beide findest du im Supabase-Dashboard unter Project Settings → API.
+          </p>
+        </Card>
+      </div>
+    );
+  }
+
+  if (checking) {
+    return (
+      <div className="flex min-h-screen items-center justify-center">
+        <div className="h-8 w-8 animate-spin rounded-full border-2 border-slate-300 border-t-slate-800" />
+      </div>
+    );
+  }
+
+  if (!session) return <AuthScreen onDone={() => {}} />;
+  if (needsPassword) return <SetPasswordScreen onDone={() => setNeedsPassword(false)} />;
+
+  return <App session={session} onSignOut={() => sb.auth.signOut()} />;
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<Root />);
+</script>
+</body>
+</html>
