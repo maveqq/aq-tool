@@ -435,7 +435,7 @@ window.BQ_INVITE = /type=(invite|recovery|signup)/.test(window.location.hash || 
         : { tone: "ok", text: "E-Mail ist unterwegs. Sieh auch im Spam-Ordner nach." });
     };
 
-    return /* @__PURE__ */ React.createElement(Shell, { title: "B\u00FCroquote", subtitle: "Melde dich an, um deine Tage zu sehen." },
+    return /* @__PURE__ */ React.createElement(Shell, { title: "B\u00FCroquote", subtitle: "Melde dich an, um deine Quote zu sehen." },
       /* @__PURE__ */ React.createElement(AuthField, {
         label: "E-Mail", type: "email", autoComplete: "username",
         value: email, onChange: (e) => setEmail(e.target.value)
